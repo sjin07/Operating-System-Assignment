@@ -16,3 +16,11 @@ kernel/kernel
 user/usys.S
 .gdbinit
 TAGS
+
+tags
+tags.lock
+tags.temp
+cscope.out
+cscope.files
+cscope.in.out
+cscope.po.out
