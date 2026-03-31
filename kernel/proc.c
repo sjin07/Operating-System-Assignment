@@ -125,6 +125,8 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  p->nice_value = 20;
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -686,5 +688,117 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+int
+getnice(int pid)
+{
+	struct proc* p;
+  
+  for (p = proc; p < &proc[NPROC]; ++p){
+    acquire(&p->lock);
+    if (p->state != UNUSED && p->pid == pid){
+      int n = p->nice_value;
+      release(&p->lock);
+      return n;
+    }
+    release(&p->lock);
+  }
+
+  return -1;
+}
+
+
+int
+setnice(int pid, int value)
+{
+  struct proc* p;
+
+  if (value < 0 || value > 39){
+    return -1;
+  }
+
+  for (p = proc; p < &proc[NPROC]; ++p){
+    acquire(&p->lock);
+    if (p->state != UNUSED && p->pid == pid){
+      p->nice_value = value;
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+
+  return -1;
+}
+
+void 
+ps(int pid)
+{
+  struct proc* p;
+
+  static char* states[] = {
+    [UNUSED] "UNUSED  ",
+    [SLEEPING] "SLEEPING",
+    [RUNNABLE] "RUNNABLE",
+    [RUNNING] "RUNNING ",
+    [ZOMBIE] "ZOMBIE  "
+  };
+
+  printf("name\t\tpid\t\tstate\t\tpriority\n");
+  if (pid == 0){
+    for (p = proc; p < &proc[NPROC]; p++){
+      acquire(&p->lock);
+      if (p->state != UNUSED){
+        printf("%s\t\t%d\t\t%s\t%d\n", p->name, p->pid, states[p->state], p->nice_value);
+      }
+      release(&p->lock);
+    }
+    return;
+  }
+
+  for (p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if (p->pid == pid){
+      printf("%s\t\t%d\t\t%s\t%d\n", p->name, p->pid, states[p->state], p->nice_value);
+    }
+    release(&p->lock);
+  }
+
+  return;
+}
+
+int 
+waitpid(int pid)
+{
+  struct proc* np;
+  int havechild, kid_exists;
+  struct proc* p = myproc();
+
+  acquire(&wait_lock);
+
+  while (1){
+    havechild = 0;
+    kid_exists = 0;
+    for (np = proc; np < &proc[NPROC]; np++){
+      if (np->pid == pid){
+        kid_exists = 1;
+        if (np->parent == p){
+          havechild = 1;
+          if (np->state == ZOMBIE){
+            freeproc(np);
+            release(&wait_lock);
+            return 0;
+          }
+        }
+        break;
+      }
+    }
+    if (!kid_exists || !havechild || p->killed){
+      release(&wait_lock);
+      return -1;
+    }
+
+    sleep(p, &wait_lock);
   }
 }

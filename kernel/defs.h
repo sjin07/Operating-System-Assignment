@@ -181,5 +181,13 @@ void            virtio_disk_init(void);
 void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
 
+// assignment 1
+int getnice(int pid);
+int setnice(int pid, int value);
+void ps(int pid);
+uint64 meminfo(void);
+uint64 count_free_mem(void);
+int waitpid(int pid);
+
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
