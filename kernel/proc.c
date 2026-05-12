@@ -29,6 +29,16 @@ struct spinlock wait_lock;
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
+
+
+const int nice_to_weight[40] = {
+    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
+    9548,  7620,  6100,  4904,  3906,  3121,  2501,  1991,  1586,  1277,
+    1024,   820,   655,   526,   423,   335,   272,   215,   172,   137,
+     110,    87,    70,    56,    45,    36,    29,    23,    18,    15
+};
+
+
 void
 proc_mapstacks(pagetable_t kpgtbl)
 {
@@ -126,6 +136,12 @@ found:
   p->state = USED;
 
   p->nice_value = 20;
+  p->weight = nice_to_weight[p->nice_value];
+  p->runtime = 0;
+  p->vruntime = 0;
+  p->time_slice = 5;
+  p->vdeadline = 5000 * 1024 / p->weight;
+  p->is_eligible = 1;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -269,6 +285,15 @@ kfork(void)
   if((np = allocproc()) == 0){
     return -1;
   }
+
+  np->nice_value = p->nice_value;
+  np->weight = p->weight;
+  np->vruntime = p->vruntime;
+
+  np->runtime = 0;
+  np->time_slice = 5;
+
+  np->vdeadline = np->vruntime + (5000 * 1024) / np->weight;
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
@@ -437,29 +462,60 @@ scheduler(void)
     // to avoid a possible race between an interrupt
     // and wfi.
     intr_on();
-    intr_off();
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
+    uint64 v0 = (uint64) - 1;
+    uint64 sum_w = 0;
+    uint64 sum_left = 0;
+    int active = 0;
+
+    for (p = proc; p < &proc[NPROC]; p++){
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      if (p->state == RUNNABLE){
+        if (p->vruntime < v0) v0 = p->vruntime;
+        active++;
       }
       release(&p->lock);
     }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      asm volatile("wfi");
+
+    if (active == 0) continue;
+
+    for (p = proc; p < &proc[NPROC]; p++){
+      acquire(&p->lock);
+      if (p->state == RUNNABLE){
+        sum_w += p->weight;
+        sum_left += (p->vruntime - v0) * p->weight;
+      }
+      release(&p->lock);
+    }
+
+    struct proc* best_p = 0;
+    uint64 min_vdeadline = (uint64) -1;
+    
+    for (p = proc; p < &proc[NPROC]; p++){
+      acquire(&p->lock);
+      if (p->state == RUNNABLE){
+        if (sum_left >= (p->vruntime - v0) * sum_w){
+          p->is_eligible = 1;
+          if (p->vdeadline < min_vdeadline){
+            min_vdeadline = p->vdeadline;
+            best_p = p;
+          }
+        } else{
+          p->is_eligible = 0;
+        }
+      }
+      release(&p->lock);
+    }
+
+    if (best_p){
+      acquire(&best_p->lock);
+      if (best_p->state == RUNNABLE){
+        best_p->state = RUNNING;
+        c->proc = best_p;
+        swtch(&c->context, &best_p->context);
+        c->proc = 0;
+      }
+      release(&best_p->lock);
     }
   }
 }
@@ -582,6 +638,8 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        p->time_slice = 5;
+        p->vdeadline = p->vruntime + (5000 * 1024) / p->weight;
       }
       release(&p->lock);
     }
@@ -719,10 +777,14 @@ setnice(int pid, int value)
     return -1;
   }
 
-  for (p = proc; p < &proc[NPROC]; ++p){
+  for (p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
-    if (p->state != UNUSED && p->pid == pid){
+    if (p->pid == pid){
       p->nice_value = value;
+      p->weight = nice_to_weight[value];
+
+      p->vdeadline = p->vruntime + (5000 * 1024) / p->weight;
+
       release(&p->lock);
       return 0;
     }
@@ -736,36 +798,35 @@ void
 ps(int pid)
 {
   struct proc* p;
+  extern uint ticks;
+  uint total_ticks_milli = ticks * 1000;
 
   static char* states[] = {
-    [UNUSED] "UNUSED  ",
-    [SLEEPING] "SLEEPING",
-    [RUNNABLE] "RUNNABLE",
-    [RUNNING] "RUNNING ",
-    [ZOMBIE] "ZOMBIE  "
+    [UNUSED]   "unused",
+    [SLEEPING] "sleep",
+    [RUNNABLE] "runble",
+    [RUNNING]  "run",
+    [ZOMBIE]   "zombie"
   };
 
-  printf("name\t\tpid\t\tstate\t\tpriority\n");
-  if (pid == 0){
-    for (p = proc; p < &proc[NPROC]; p++){
-      acquire(&p->lock);
-      if (p->state != UNUSED){
-        printf("%s\t\t%d\t\t%s\t%d\n", p->name, p->pid, states[p->state], p->nice_value);
-      }
-      release(&p->lock);
-    }
-    return;
-  }
-
+  printf("name\tpid\tstate\tpriority\truntime/weight\truntime\tvruntime\tvdeadline\tis_eligible\ttick %d\n", total_ticks_milli);
   for (p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
-    if (p->pid == pid){
-      printf("%s\t\t%d\t\t%s\t%d\n", p->name, p->pid, states[p->state], p->nice_value);
+    if (p->state != UNUSED && (pid == 0 || p->pid == pid)){
+      int rt_weight = (int)(p->runtime / p->weight);
+      printf("%s\t%d\t%s\t%d\t\t%d\t\t%d\t%d\t\t%d\t\t%s\n",
+            p->name,
+            p->pid,
+            states[p->state],
+            p->nice_value,
+            rt_weight,
+            (int)p->runtime,
+            (int)p->vruntime,
+            (int)p->vdeadline,
+            p->is_eligible ? "true" : "false");
     }
     release(&p->lock);
   }
-
-  return;
 }
 
 int 

@@ -1,47 +1,56 @@
 #include "kernel/types.h"
-#include "user.h"
 #include "kernel/stat.h"
-
-int main(){
-	int pid = getpid();
-
-	int n = getnice(pid);
-	printf("Current Getnice Value = %d\n", n);
-
-	setnice(pid, 100);
-	n = getnice(pid);
-	printf("Current Getnice Value, revised = %d\n", n);
-	
-	printf("Test ps\n");
-	ps(0);
-	ps(pid);
-
-	uint64 free_bytes = meminfo();
-	printf("Free memory: %ld bytes\n", free_bytes);
-
-	pid = fork();
-	if (pid < 0){
-		printf("fork failed\n");
-		exit(1);
-	}
-
-	if (pid == 0){
-		printf("Child existing\n");
-		exit(0);
-	} else{
-		printf("Parent waiting for pid %d\n", pid);
-		int res = waitpid(pid);
-		if (res == 0){
-			printf("waitpid success!\n");
-		} else{
-			printf("waitpid failed!\n");
-		}
-
-		if (waitpid(999) == -1){
-			printf("Non-existent PID test passed\n");
-		}
-	}
-
-	return 0;
+#include "user/user.h"
+// A simple CPU-bound dummy task to consume time slice
+void spin() {
+    volatile int x = 0;
+    for (int i = 0; i < 20000; i++) {
+        for (int j = 0; j < 10000; j++) {
+            x = x + 1;
+        }
+    }
 }
 
+int main(int argc, char *argv[])
+{
+    printf("=== TEST START ===\n");
+
+    int pid = fork();
+
+    if (pid < 0) {
+        printf("fork failed!\n");
+        exit(1);
+    }
+
+    if (pid == 0) {
+        // --- CHILD PROCESS ---
+        // Set child's nice value to 10
+        setnice(getpid(), 10);
+        
+        // Spin to consume CPU time
+        spin();
+        
+        exit(0);
+    } else {
+        // --- PARENT PROCESS ---
+        // Set parent's nice value to 0
+        setnice(getpid(), 0);
+
+        // Spin to consume CPU time 
+        // (Slightly shorter so parent finishes its loop while child is still running)
+        volatile int x = 0;
+        for (int i = 0; i < 10000; i++) {
+            for (int j = 0; j < 10000; j++) {
+                x = x + 1;
+            }
+        }
+
+        // Call the modified ps() system call to print all processes
+        ps(0);
+
+        // Wait for the child to finish
+        wait(0);
+    }
+
+    exit(0);
+}
